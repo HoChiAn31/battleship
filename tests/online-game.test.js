@@ -11,7 +11,7 @@ import {
   requestRematch,
   submitFleet,
 } from '../js/online-game.js';
-import { generateRoomCode, isValidRoomCode, normalizeRoomCode } from '../js/net.js';
+import { brokerIndexForCode, generateRoomCode, isValidRoomCode, normalizeRoomCode } from '../js/net.js';
 
 function randomFleet() {
   const player = createPlayer('tmp');
@@ -143,4 +143,13 @@ test('room codes', () => {
   assert.equal(normalizeRoomCode(' ab-c 12x9 '), 'ABC12X');
   assert.equal(normalizeRoomCode(null), '');
   assert.equal(isValidRoomCode('ABC'), false);
+});
+
+test('room code tells the guest which broker the host is on', () => {
+  for (const brokerIndex of [0, 1]) {
+    for (let i = 0; i < 50; i++) {
+      assert.equal(brokerIndexForCode(generateRoomCode(Math.random, brokerIndex)), brokerIndex);
+    }
+  }
+  assert.equal(brokerIndexForCode('000000'), 0, 'unknown first character falls back to the first broker');
 });
