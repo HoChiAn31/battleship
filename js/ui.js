@@ -1,4 +1,13 @@
-import { BOARD_SIZE, CELL, ORIENTATION, PHASE, ROW_LABELS, SHIP_STATE, SHOT_RESULT } from './constants.js';
+import {
+  BOARD_SIZE,
+  CELL,
+  ONLINE_PHASE,
+  ORIENTATION,
+  PHASE,
+  ROW_LABELS,
+  SHIP_STATE,
+  SHOT_RESULT,
+} from './constants.js';
 import { findShip, isFleetPlaced, isShipPlaced } from './board.js';
 import { getCurrentPlayer, getOpponent, getSetupPlayer } from './game.js';
 
@@ -8,7 +17,7 @@ export function renderApp(game, view) {
       return renderStart(view);
     case PHASE.PLAYER_1_SETUP:
     case PHASE.PLAYER_2_SETUP:
-      return renderSetup(game, view);
+      return renderSetup(getSetupPlayer(game), view, { title: `${getSetupPlayer(game).name} - Deploy Your Fleet` });
     case PHASE.PLAYER_1_READY:
       return renderMessageScreen({
         title: 'Player 1 Ready!',
@@ -33,9 +42,9 @@ export function renderApp(game, view) {
         label: 'Continue',
       });
     case PHASE.BATTLE:
-      return renderBattle(game, view);
+      return renderLocalBattle(game, view);
     case PHASE.GAME_OVER:
-      return renderBattle(game, view) + renderVictory(game);
+      return renderLocalBattle(game, view) + renderVictory(game);
     default:
       return '';
   }
@@ -56,9 +65,10 @@ function renderStart(view) {
     <section class="screen screen--center">
       <div class="card start-card">
         <h1 class="logo">BATTLESHIPS</h1>
-        <p class="tagline">Local 2-player naval combat</p>
+        <p class="tagline">2-player naval combat - same device or online</p>
         <div class="stack">
-          <button class="btn btn--primary btn--large" data-action="two-players">2 Players</button>
+          <button class="btn btn--primary btn--large" data-action="two-players">2 Players (Same Device)</button>
+          <button class="btn btn--primary btn--large" data-action="online-menu">Play Online</button>
           <button class="btn btn--large" data-action="show-help">How to Play</button>
         </div>
       </div>
@@ -78,7 +88,8 @@ function renderHowToPlay() {
           <li><span class="legend legend--hit">●</span> Red means <strong>HIT</strong>, <span class="legend legend--miss">✕</span> means <strong>MISS</strong>.</li>
           <li>When every cell of a ship is hit, the ship is <strong>SUNK</strong>.</li>
           <li>Sink the whole enemy fleet to win!</li>
-          <li>Pass the device between turns and don't peek at your opponent's fleet.</li>
+          <li><strong>Same device:</strong> pass the device between turns and don't peek at your opponent's fleet.</li>
+          <li><strong>Online:</strong> one player creates a room and shares the 6-character code (or invite link); the other joins with it.</li>
         </ol>
         <button class="btn btn--primary" data-action="close-help">Got it</button>
       </div>
@@ -88,7 +99,7 @@ function renderHowToPlay() {
 
 /* ---------- Message / pass-device screens ---------- */
 
-function renderMessageScreen({ eyebrow = '', title, text = '', note = '', action, label }) {
+function renderMessageScreen({ eyebrow = '', title, text = '', note = '', action, label, secondary = '' }) {
   return `
     <section class="screen screen--center">
       <div class="card message-card">
@@ -96,7 +107,8 @@ function renderMessageScreen({ eyebrow = '', title, text = '', note = '', action
         <h2 class="message-title">${title}</h2>
         ${text ? `<p class="message-text">${text}</p>` : ''}
         ${note ? `<p class="message-note">${note}</p>` : ''}
-        <button class="btn btn--primary btn--large" data-action="${action}">${label}</button>
+        ${action ? `<button class="btn btn--primary btn--large" data-action="${action}">${label}</button>` : ''}
+        ${secondary}
       </div>
     </section>
   `;
@@ -143,8 +155,7 @@ function renderCell(cell, row, col, { showShips, clickAction, animateKeys }) {
 
 /* ---------- Setup ---------- */
 
-function renderSetup(game, view) {
-  const player = getSetupPlayer(game);
+function renderSetup(player, view, { title, badge = '', note = '' }) {
   const isHorizontal = view.orientation === ORIENTATION.HORIZONTAL;
 
   const shipItems = player.ships
@@ -167,8 +178,10 @@ function renderSetup(game, view) {
   return `
     <section class="screen setup">
       <header class="screen-header">
-        <h2>${player.name} - Deploy Your Fleet</h2>
+        ${badge}
+        <h2>${title}</h2>
         <p class="hint">Select a ship, then tap the board to place it. Select a placed ship to move it. Press <kbd>R</kbd> to rotate.</p>
+        ${note ? `<p class="opponent-note">${note}</p>` : ''}
       </header>
       <div class="setup-layout">
         <div class="board-wrap">
@@ -216,14 +229,12 @@ function renderFleetStatus(player, title) {
   `;
 }
 
-function renderShotStatus(game, view) {
-  const shot = game.lastShot;
-
-  if (view.message) {
-    return `<p class="status">${view.message}</p>`;
+function renderShotStatus(shot, message, idleText) {
+  if (message) {
+    return `<p class="status">${message}</p>`;
   }
   if (!shot) {
-    return '<p class="status">Select a cell to fire</p>';
+    return `<p class="status">${idleText}</p>`;
   }
 
   const where = coordinate(shot.row, shot.col);
@@ -239,11 +250,9 @@ function renderShotStatus(game, view) {
   `;
 }
 
-function renderIncomingShot(game) {
-  const shot = game.incomingShot;
+function renderIncomingShot(shot, enemyName) {
   if (!shot) return '';
 
-  const enemyName = getOpponent(game).name;
   const where = coordinate(shot.row, shot.col);
   let text = `${enemyName} fired at ${where} and missed.`;
   if (shot.result === SHOT_RESULT.HIT) text = `${enemyName} hit your ship at ${where}!`;
@@ -251,24 +260,36 @@ function renderIncomingShot(game) {
   return `<p class="incoming">${text}</p>`;
 }
 
-function renderBattle(game, view) {
-  const player = getCurrentPlayer(game);
-  const opponent = getOpponent(game);
-  const canFire = game.phase === PHASE.BATTLE && !game.hasFired;
-  const showEndTurn = game.phase === PHASE.BATTLE && game.hasFired;
+function renderRoomBadge(code) {
+  return code ? `<span class="room-badge">Room <strong>${code}</strong></span>` : '';
+}
 
+function renderBattle({
+  title,
+  incomingHtml,
+  statusHtml,
+  actionHtml = '',
+  player,
+  opponent,
+  canFire,
+  ownShot,
+  enemyShot,
+  revealEnemy = false,
+  roomCode = '',
+}) {
   return `
     <section class="screen battle">
       <header class="battle-header">
         <h1 class="logo logo--small">BATTLESHIPS</h1>
+        ${renderRoomBadge(roomCode)}
         <button class="btn btn--small btn--ghost" data-action="quit">Menu</button>
       </header>
 
       <div class="turn-banner">
-        <h2 class="turn-title">${player.name}'s turn</h2>
-        ${renderIncomingShot(game)}
-        <div class="turn-status">${renderShotStatus(game, view)}</div>
-        ${showEndTurn ? '<button class="btn btn--primary" data-action="end-turn">End Turn</button>' : ''}
+        <h2 class="turn-title">${title}</h2>
+        ${incomingHtml}
+        <div class="turn-status">${statusHtml}</div>
+        ${actionHtml}
       </div>
 
       <div class="boards">
@@ -278,7 +299,7 @@ function renderBattle(game, view) {
             board: player.board,
             boardId: 'own',
             showShips: true,
-            animateKeys: getShotKeys(player, game.incomingShot),
+            animateKeys: getShotKeys(player, ownShot),
           })}
           ${renderFleetStatus(player, 'Your Ships')}
         </section>
@@ -287,15 +308,34 @@ function renderBattle(game, view) {
           ${renderBoard({
             board: opponent.board,
             boardId: 'enemy',
-            showShips: false,
+            showShips: revealEnemy,
             clickAction: canFire ? 'fire' : null,
-            animateKeys: getShotKeys(opponent, game.lastShot),
+            animateKeys: getShotKeys(opponent, enemyShot),
           })}
           ${renderFleetStatus(opponent, 'Enemy Fleet')}
         </section>
       </div>
     </section>
   `;
+}
+
+function renderLocalBattle(game, view) {
+  const player = getCurrentPlayer(game);
+  const opponent = getOpponent(game);
+  const canFire = game.phase === PHASE.BATTLE && !game.hasFired;
+  const showEndTurn = game.phase === PHASE.BATTLE && game.hasFired;
+
+  return renderBattle({
+    title: `${player.name}'s turn`,
+    incomingHtml: renderIncomingShot(game.incomingShot, opponent.name),
+    statusHtml: renderShotStatus(game.lastShot, view.message, 'Select a cell to fire'),
+    actionHtml: showEndTurn ? '<button class="btn btn--primary" data-action="end-turn">End Turn</button>' : '',
+    player,
+    opponent,
+    canFire,
+    ownShot: game.incomingShot,
+    enemyShot: game.lastShot,
+  });
 }
 
 /* ---------- Victory ---------- */
@@ -310,6 +350,164 @@ function renderVictory(game) {
         <p class="message-text">Enemy fleet destroyed!</p>
         <div class="stack">
           <button class="btn btn--primary btn--large" data-action="play-again">Play Again</button>
+          <button class="btn btn--large" data-action="main-menu">Main Menu</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+/* ---------- Online ---------- */
+
+// online: the online session state kept in main.js.
+export function renderOnline(online, view) {
+  switch (online.status) {
+    case 'menu':
+      return renderOnlineMenu(online);
+    case 'hosting':
+      return renderHosting(online, view);
+    case 'joining':
+      return renderMessageScreen({
+        eyebrow: `Room ${online.code}`,
+        title: 'Joining room…',
+        note: 'Connecting to your friend.',
+        secondary: '<button class="btn btn--ghost" data-action="leave-online">Cancel</button>',
+      });
+    case 'playing':
+      return renderOnlineGame(online, view);
+    case 'disconnected':
+      return renderMessageScreen({
+        eyebrow: 'Connection lost',
+        title: 'Your opponent left the game',
+        note: 'The online match has ended.',
+        action: 'main-menu',
+        label: 'Main Menu',
+      });
+    default:
+      return '';
+  }
+}
+
+function renderOnlineMenu(online) {
+  return `
+    <section class="screen screen--center">
+      <div class="card start-card">
+        <h2 class="message-title">Play Online</h2>
+        <p class="tagline">Create a room and share the code with a friend, or join theirs.</p>
+        <div class="stack">
+          <button class="btn btn--primary btn--large" data-action="create-room">Create Room</button>
+          <div class="divider"><span>or join a room</span></div>
+          <form class="join-form" data-form="join-room">
+            <input id="room-code" class="code-input" name="code" maxlength="6" placeholder="CODE"
+              autocomplete="off" autocapitalize="characters" spellcheck="false"
+              aria-label="Room code" value="${online.codeInput}" />
+            <button class="btn btn--large" type="submit">Join</button>
+          </form>
+          <p class="setup-message" role="alert">${online.error}</p>
+          <button class="btn btn--ghost" data-action="main-menu">Back</button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderHosting(online, view) {
+  if (!online.code) {
+    return renderMessageScreen({
+      title: 'Creating room…',
+      secondary: '<button class="btn btn--ghost" data-action="leave-online">Cancel</button>',
+    });
+  }
+
+  return `
+    <section class="screen screen--center">
+      <div class="card message-card">
+        <p class="eyebrow">Room created</p>
+        <h2 class="message-title">Share this code</h2>
+        <div class="room-code" aria-label="Room code">${online.code}</div>
+        <div class="button-row">
+          <button class="btn" data-action="copy-code">Copy Code</button>
+          <button class="btn" data-action="copy-link">Copy Invite Link</button>
+        </div>
+        <p class="copy-message" role="status">${view.message}</p>
+        <p class="message-note waiting">Waiting for your friend to join<span class="dots"></span></p>
+        <button class="btn btn--ghost" data-action="leave-online">Cancel</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderOnlineGame(online, view) {
+  const state = online.state;
+  if (!state) {
+    return renderMessageScreen({ eyebrow: `Room ${online.code}`, title: 'Connected!', note: 'Loading the game…' });
+  }
+
+  if (state.phase === ONLINE_PHASE.SETUP) {
+    const opponentReady = state.ready[1 - state.me];
+    if (online.fleetSent || state.ready[state.me]) {
+      return renderMessageScreen({
+        eyebrow: `Room ${online.code}`,
+        title: 'Fleet deployed!',
+        text: opponentReady ? 'Starting the battle…' : 'Waiting for your opponent to finish deploying.',
+        note: '<span class="waiting">Hang tight<span class="dots"></span></span>',
+        secondary: '<button class="btn btn--ghost" data-action="quit">Leave Game</button>',
+      });
+    }
+    return renderSetup(online.setupPlayer, view, {
+      title: 'Deploy Your Fleet',
+      badge: renderRoomBadge(online.code),
+      note: opponentReady ? 'Your opponent is ready!' : 'Your opponent is deploying their fleet…',
+    });
+  }
+
+  return renderOnlineBattle(online, view) + (state.phase === ONLINE_PHASE.GAME_OVER ? renderOnlineResult(state) : '');
+}
+
+function renderOnlineBattle(online, view) {
+  const state = online.state;
+  const myTurn = state.phase === ONLINE_PHASE.BATTLE && state.currentPlayer === state.me;
+  const shot = state.lastShot;
+  const myShot = shot && shot.by === state.me ? shot : null;
+  const theirShot = shot && shot.by !== state.me ? shot : null;
+
+  let title = myTurn ? 'Your turn' : "Opponent's turn";
+  if (state.phase === ONLINE_PHASE.GAME_OVER) title = state.winner === state.me ? 'Victory!' : 'Defeat';
+
+  return renderBattle({
+    title,
+    incomingHtml: renderIncomingShot(theirShot, 'Opponent'),
+    statusHtml: renderShotStatus(
+      myShot,
+      view.message,
+      myTurn ? 'Select a cell to fire' : 'Waiting for your opponent to fire…'
+    ),
+    player: state.player,
+    opponent: state.opponent,
+    canFire: myTurn,
+    ownShot: theirShot,
+    enemyShot: myShot,
+    revealEnemy: state.phase === ONLINE_PHASE.GAME_OVER,
+    roomCode: online.code,
+  });
+}
+
+function renderOnlineResult(state) {
+  const won = state.winner === state.me;
+  const waiting = state.rematch[state.me];
+  const opponentWantsRematch = state.rematch[1 - state.me];
+
+  return `
+    <div class="overlay overlay--victory">
+      <div class="card modal victory ${won ? '' : 'victory--lost'}" role="dialog" aria-modal="true" aria-labelledby="victory-title">
+        <p class="eyebrow">${won ? 'Victory' : 'Defeat'}</p>
+        <h2 id="victory-title" class="victory-title">${won ? 'YOU WIN!' : 'YOU LOSE'}</h2>
+        <p class="message-text">${won ? 'Enemy fleet destroyed!' : 'Your fleet was destroyed.'}</p>
+        ${opponentWantsRematch && !waiting ? '<p class="message-note">Your opponent wants a rematch!</p>' : ''}
+        <div class="stack">
+          <button class="btn btn--primary btn--large" data-action="rematch" ${waiting ? 'disabled' : ''}>
+            ${waiting ? 'Waiting for opponent…' : 'Rematch'}
+          </button>
           <button class="btn btn--large" data-action="main-menu">Main Menu</button>
         </div>
       </div>

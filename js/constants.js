@@ -46,3 +46,9 @@ export const PHASE = {
   BATTLE: 'BATTLE',
   GAME_OVER: 'GAME_OVER',
 };
+
+export const ONLINE_PHASE = {
+  SETUP: 'SETUP',
+  BATTLE: 'BATTLE',
+  GAME_OVER: 'GAME_OVER',
+};

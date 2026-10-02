@@ -1,6 +1,7 @@
-import { ORIENTATION, SHOT_RESULT } from './constants.js';
+import { ONLINE_PHASE, ORIENTATION, PHASE, SHOT_RESULT } from './constants.js';
 import {
   canPlaceShip,
+  createPlayer,
   findShip,
   getShipCells,
   isInsideBoard,
@@ -16,15 +17,20 @@ import {
   createGame,
   endTurn,
   fire,
+  getOpponent,
   getSetupPlayer,
   isSetupPhase,
   startBattle,
   startNewGame,
 } from './game.js';
-import { renderApp } from './ui.js';
+import { createOnlineGame, fireAt, getPlayerView, requestRematch, submitFleet } from './online-game.js';
+import { hostRoom, isValidRoomCode, joinRoom, normalizeRoomCode } from './net.js';
+import { celebrateVictory, playShotEffect } from './effects.js';
+import { renderApp, renderOnline } from './ui.js';
 
 const app = document.getElementById('app');
 
+let mode = 'local'; // 'local' | 'online'
 let game = createGame();
 
 // UI-only state: it changes how things look, not the rules of the game.
@@ -36,8 +42,45 @@ const view = {
   showHelp: false,
 };
 
+const online = {
+  status: 'menu', // 'menu' | 'hosting' | 'joining' | 'playing' | 'disconnected'
+  session: null,
+  attempt: 0, // bumped on every new session so callbacks from an old one are ignored
+  me: 0, // 0 = host, 1 = guest
+  code: '',
+  codeInput: '',
+  error: '',
+  game: null, // authoritative game, host only
+  state: null, // what this player is allowed to see
+  setupPlayer: createPlayer('You'),
+  fleetSent: false,
+};
+
+const isHost = () => online.me === 0;
+
+/* ---------- Setup helpers (shared by both modes) ---------- */
+
+function isOnlineSetup() {
+  const state = online.state;
+  return (
+    online.status === 'playing' &&
+    state?.phase === ONLINE_PHASE.SETUP &&
+    !online.fleetSent &&
+    !state.ready[online.me]
+  );
+}
+
+function setupPlayer() {
+  if (mode === 'online') return isOnlineSetup() ? online.setupPlayer : null;
+  return getSetupPlayer(game);
+}
+
+function inSetup() {
+  return mode === 'online' ? isOnlineSetup() : isSetupPhase(game);
+}
+
 function resetSetupView() {
-  const player = getSetupPlayer(game);
+  const player = setupPlayer();
   view.selectedShipId = player ? player.ships[0].id : null;
   view.orientation = ORIENTATION.HORIZONTAL;
   view.hoverCell = null;
@@ -60,7 +103,7 @@ function getShipOrientation(ship) {
 }
 
 function handlePlace(row, col) {
-  const player = getSetupPlayer(game);
+  const player = setupPlayer();
 
   if (!view.selectedShipId) {
     view.message = 'Select a ship from the list first.';
@@ -74,11 +117,45 @@ function handlePlace(row, col) {
   }
 }
 
-function handleFire(row, col) {
+/* ---------- Effects ---------- */
+
+// Effects need the freshly rendered cells, so they run right after the next render.
+let pendingEffects = [];
+
+function queueShotEffect(boardId, shot, target) {
+  const cells = shot.result === SHOT_RESULT.SUNK ? findShip(target, shot.shipId).cells : [shot];
+  pendingEffects.push(() => {
+    const elements = cells
+      .map(({ row, col }) => app.querySelector(`[data-board="${boardId}"] [data-row="${row}"][data-col="${col}"]`))
+      .filter(Boolean);
+    playShotEffect(elements, shot.result);
+  });
+}
+
+function queueVictory() {
+  pendingEffects.push(celebrateVictory);
+}
+
+function flushEffects() {
+  if (!pendingEffects.length) return;
+  const effects = pendingEffects;
+  pendingEffects = [];
+  requestAnimationFrame(() => effects.forEach((effect) => effect()));
+}
+
+/* ---------- Local game ---------- */
+
+function handleLocalFire(row, col) {
   const shot = fire(game, row, col);
-  if (shot && shot.result === SHOT_RESULT.ALREADY_SHOT) {
+  if (!shot) return;
+  if (shot.result === SHOT_RESULT.ALREADY_SHOT) {
     view.message = 'You already fired at that cell. Pick another one.';
+    return;
   }
+  if (shot.result === SHOT_RESULT.INVALID) return;
+
+  queueShotEffect('enemy', game.lastShot, getOpponent(game));
+  if (game.phase === PHASE.GAME_OVER) queueVictory();
 }
 
 function newGame() {
@@ -86,33 +163,229 @@ function newGame() {
   resetSetupView();
 }
 
+/* ---------- Online game ---------- */
+
+function leaveSession() {
+  online.attempt += 1;
+  online.session?.close();
+  online.session = null;
+}
+
+function resetOnline(status) {
+  leaveSession();
+  Object.assign(online, { status, code: '', error: '', game: null, state: null, fleetSent: false });
+}
+
+// Wraps network callbacks so they are dropped once the user has left that session.
+function guarded(handlers) {
+  const attempt = online.attempt;
+  const wrapped = {};
+  for (const [name, fn] of Object.entries(handlers)) {
+    wrapped[name] = (...args) => {
+      if (attempt === online.attempt) fn(...args);
+    };
+  }
+  return wrapped;
+}
+
+function handleNetError(message) {
+  if (online.status === 'playing') {
+    handleDisconnect();
+    return;
+  }
+  resetOnline('menu');
+  online.error = message;
+  render();
+}
+
+function handleDisconnect() {
+  resetOnline('disconnected');
+  render();
+}
+
+function applyState(next) {
+  const prev = online.state;
+  online.state = next;
+
+  if (!prev || next.round !== prev.round) {
+    online.setupPlayer = createPlayer('You');
+    online.fleetSent = false;
+    resetSetupView();
+  }
+
+  if (next.lastShot && next.shotCount !== prev?.shotCount) {
+    const mine = next.lastShot.by === next.me;
+    queueShotEffect(mine ? 'enemy' : 'own', next.lastShot, mine ? next.opponent : next.player);
+  }
+  if (next.phase === ONLINE_PHASE.GAME_OVER && prev?.phase !== ONLINE_PHASE.GAME_OVER && next.winner === next.me) {
+    queueVictory();
+  }
+  render();
+}
+
+// Host only: share the new state with both players.
+function publish() {
+  online.session?.send({ type: 'state', state: getPlayerView(online.game, 1) });
+  applyState(getPlayerView(online.game, 0));
+}
+
+function handleGuestMessage(message) {
+  const hostGame = online.game;
+  if (!hostGame || !message) return;
+
+  if (message.type === 'fleet') submitFleet(hostGame, 1, message.ships);
+  else if (message.type === 'fire') fireAt(hostGame, 1, message.row, message.col);
+  else if (message.type === 'rematch') requestRematch(hostGame, 1);
+  else return;
+  publish();
+}
+
+async function createRoom() {
+  resetOnline('hosting');
+  online.me = 0;
+  render();
+
+  const handlers = guarded({
+    onReady: (code) => {
+      online.code = code;
+      render();
+    },
+    onConnected: () => {
+      online.status = 'playing';
+      online.game = createOnlineGame();
+      publish();
+    },
+    onMessage: handleGuestMessage,
+    onClose: handleDisconnect,
+    onError: handleNetError,
+  });
+
+  const attempt = online.attempt;
+  try {
+    const session = await hostRoom(handlers);
+    if (attempt === online.attempt) online.session = session;
+    else session.close();
+  } catch (error) {
+    if (attempt === online.attempt) handleNetError(error.message);
+  }
+}
+
+async function joinRoomWithCode(code) {
+  resetOnline('joining');
+  online.me = 1;
+  online.code = code;
+  render();
+
+  const handlers = guarded({
+    onConnected: () => {
+      online.status = 'playing';
+      render();
+    },
+    onMessage: (message) => {
+      if (message?.type === 'state') applyState(message.state);
+    },
+    onClose: handleDisconnect,
+    onError: handleNetError,
+  });
+
+  const attempt = online.attempt;
+  try {
+    const session = await joinRoom(code, handlers);
+    if (attempt === online.attempt) online.session = session;
+    else session.close();
+  } catch (error) {
+    if (attempt === online.attempt) handleNetError(error.message);
+  }
+}
+
+function submitOnlineFleet() {
+  const ships = online.setupPlayer.ships.map(({ id, cells }) => ({ id, cells }));
+  online.fleetSent = true;
+  if (isHost()) {
+    submitFleet(online.game, 0, ships);
+    publish();
+  } else {
+    online.session?.send({ type: 'fleet', ships });
+  }
+}
+
+function handleOnlineFire(row, col) {
+  const state = online.state;
+  if (state?.phase !== ONLINE_PHASE.BATTLE || state.currentPlayer !== online.me) return;
+
+  if (isHost()) {
+    const shot = fireAt(online.game, 0, row, col);
+    if (shot?.result === SHOT_RESULT.ALREADY_SHOT) {
+      view.message = 'You already fired at that cell. Pick another one.';
+    } else if (shot) {
+      publish();
+    }
+    return;
+  }
+  online.session?.send({ type: 'fire', row, col });
+}
+
+function handleRematch() {
+  if (isHost()) {
+    requestRematch(online.game, 0);
+    publish();
+  } else {
+    online.session?.send({ type: 'rematch' });
+    online.state.rematch[online.me] = true;
+  }
+}
+
+function copyToClipboard(text) {
+  navigator.clipboard
+    ?.writeText(text)
+    .then(() => (view.message = 'Copied!'))
+    .catch(() => (view.message = text))
+    .finally(render);
+}
+
+function inviteLink() {
+  return `${location.origin}${location.pathname}?room=${online.code}`;
+}
+
+/* ---------- Navigation ---------- */
+
 function goToMainMenu() {
+  if (mode === 'online') resetOnline('menu');
+  mode = 'local';
   game = createGame();
   view.showHelp = false;
+  view.message = '';
+}
+
+function openOnlineMenu() {
+  mode = 'online';
+  resetOnline('menu');
 }
 
 const actions = {
   'two-players': newGame,
+  'online-menu': openOnlineMenu,
   'show-help': () => (view.showHelp = true),
   'close-help': () => (view.showHelp = false),
 
   'select-ship': (el) => {
-    const ship = findShip(getSetupPlayer(game), el.dataset.shipId);
+    const ship = findShip(setupPlayer(), el.dataset.shipId);
     view.selectedShipId = ship.id;
     if (isShipPlaced(ship)) view.orientation = getShipOrientation(ship);
   },
   place: (el) => handlePlace(Number(el.dataset.row), Number(el.dataset.col)),
   rotate: toggleOrientation,
   randomize: () => {
-    randomizeFleet(getSetupPlayer(game));
+    randomizeFleet(setupPlayer());
     view.selectedShipId = null;
   },
   reset: () => {
-    resetFleet(getSetupPlayer(game));
+    resetFleet(setupPlayer());
     resetSetupView();
   },
   ready: () => {
-    if (confirmSetup(game)) resetSetupView();
+    if (mode === 'online') submitOnlineFleet();
+    else if (confirmSetup(game)) resetSetupView();
   },
   'continue-setup': () => {
     continueToPlayer2Setup(game);
@@ -121,19 +394,37 @@ const actions = {
   'start-battle': () => startBattle(game),
 
   'begin-turn': () => beginTurn(game),
-  fire: (el) => handleFire(Number(el.dataset.row), Number(el.dataset.col)),
+  fire: (el) => {
+    const row = Number(el.dataset.row);
+    const col = Number(el.dataset.col);
+    if (mode === 'online') handleOnlineFire(row, col);
+    else handleLocalFire(row, col);
+  },
   'end-turn': () => endTurn(game),
   quit: () => {
-    if (window.confirm('Quit this game and return to the main menu?')) goToMainMenu();
+    const question =
+      mode === 'online'
+        ? 'Leave this online game? Your opponent will be disconnected.'
+        : 'Quit this game and return to the main menu?';
+    if (window.confirm(question)) goToMainMenu();
   },
 
   'play-again': newGame,
   'main-menu': goToMainMenu,
+
+  'create-room': createRoom,
+  'leave-online': () => resetOnline('menu'),
+  'copy-code': () => copyToClipboard(online.code),
+  'copy-link': () => copyToClipboard(inviteLink()),
+  rematch: handleRematch,
 };
 
+/* ---------- Rendering & events ---------- */
+
 function render() {
-  app.innerHTML = renderApp(game, view);
+  app.innerHTML = mode === 'online' ? renderOnline(online, view) : renderApp(game, view);
   updatePreview();
+  flushEffects();
 }
 
 // Hover preview is drawn by toggling classes so the board isn't re-rendered on every mouse move.
@@ -145,8 +436,8 @@ function updatePreview() {
     cell.classList.remove('cell--preview', 'cell--invalid');
   });
 
-  const player = getSetupPlayer(game);
-  if (!view.hoverCell || !view.selectedShipId) return;
+  const player = setupPlayer();
+  if (!player || !view.hoverCell || !view.selectedShipId) return;
 
   const { row, col } = view.hoverCell;
   const ship = findShip(player, view.selectedShipId);
@@ -172,8 +463,28 @@ app.addEventListener('click', (event) => {
   render();
 });
 
+app.addEventListener('submit', (event) => {
+  if (!event.target.matches('[data-form="join-room"]')) return;
+  event.preventDefault();
+
+  const code = normalizeRoomCode(event.target.elements.code.value);
+  online.codeInput = code;
+  if (!isValidRoomCode(code)) {
+    online.error = 'Room codes are 6 letters or numbers.';
+    render();
+    return;
+  }
+  joinRoomWithCode(code);
+});
+
+app.addEventListener('input', (event) => {
+  if (event.target.id !== 'room-code') return;
+  event.target.value = normalizeRoomCode(event.target.value);
+  online.codeInput = event.target.value;
+});
+
 app.addEventListener('mouseover', (event) => {
-  if (!isSetupPhase(game)) return;
+  if (!inSetup()) return;
 
   const cell = event.target.closest('[data-board="setup"] .cell');
   const hoverCell = cell ? { row: Number(cell.dataset.row), col: Number(cell.dataset.col) } : null;
@@ -190,10 +501,19 @@ document.addEventListener('keydown', (event) => {
     view.showHelp = false;
     render();
   }
-  if ((event.key === 'r' || event.key === 'R') && isSetupPhase(game)) {
+  if ((event.key === 'r' || event.key === 'R') && inSetup()) {
     toggleOrientation();
     render();
   }
 });
+
+// Invite links look like ?room=ABC123 and drop the player straight into that room.
+const invitedCode = normalizeRoomCode(new URLSearchParams(location.search).get('room'));
+if (invitedCode) {
+  history.replaceState(null, '', location.pathname);
+  mode = 'online';
+  online.codeInput = invitedCode;
+  if (isValidRoomCode(invitedCode)) joinRoomWithCode(invitedCode);
+}
 
 render();

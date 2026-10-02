@@ -1,7 +1,7 @@
 {
   "name": "battleship",
   "version": "1.0.0",
-  "description": "Local 2-player Battleship game that runs entirely in the browser",
+  "description": "2-player Battleship game for the browser: same device or online with room codes",
   "type": "module",
   "private": true,
   "scripts": {
