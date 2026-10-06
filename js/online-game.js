@@ -70,7 +70,8 @@ export function fireAt(game, playerIndex, row, col) {
   if (isFleetSunk(opponent)) {
     game.winner = playerIndex;
     game.phase = ONLINE_PHASE.GAME_OVER;
-  } else {
+  } else if (shot.result === SHOT_RESULT.MISS) {
+    // A hit (or sink) earns another shot; the turn only passes on a miss.
     game.currentPlayer = 1 - playerIndex;
   }
   return shot;

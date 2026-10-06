@@ -72,24 +72,36 @@ test('tampered fleets are rejected', () => {
   assert.equal(applyFleet(createPlayer('x'), fleet), true);
 });
 
-test('players can only fire on their own turn and turns alternate', () => {
+test('players can only fire on their own turn; a hit fires again, a miss passes the turn', () => {
   const game = gameInBattle();
   const miss = findCell(game.players[1], CELL.EMPTY);
 
   assert.equal(fireAt(game, 1, 0, 0), null, 'not player 2 turn');
   assert.equal(fireAt(game, 0, miss.row, miss.col).result, SHOT_RESULT.MISS);
-  assert.equal(game.currentPlayer, 1);
+  assert.equal(game.currentPlayer, 1, 'miss passes the turn');
   assert.deepEqual(game.lastShot, { by: 0, ...miss, result: SHOT_RESULT.MISS });
   assert.equal(game.shotCount, 1);
+  assert.equal(fireAt(game, 0, 0, 0), null, 'cannot fire after missing');
 
-  assert.equal(fireAt(game, 0, 0, 0), null, 'cannot fire twice');
   const hit = findCell(game.players[0], CELL.SHIP);
   assert.equal(fireAt(game, 1, hit.row, hit.col).result, SHOT_RESULT.HIT);
+  assert.equal(game.currentPlayer, 1, 'hit keeps the turn');
+  const p2Miss = findCell(game.players[0], CELL.EMPTY);
+  assert.equal(fireAt(game, 1, p2Miss.row, p2Miss.col).result, SHOT_RESULT.MISS);
   assert.equal(game.currentPlayer, 0);
 
   assert.equal(fireAt(game, 0, miss.row, miss.col).result, SHOT_RESULT.ALREADY_SHOT);
   assert.equal(game.currentPlayer, 0, 'repeat shot does not use up the turn');
   assert.equal(fireAt(game, 0, 'a', 1), null);
+});
+
+test('sinking a ship also keeps the turn', () => {
+  const game = gameInBattle();
+  const destroyer = game.players[1].ships.find((ship) => ship.id === 'destroyer');
+
+  assert.equal(fireAt(game, 0, destroyer.cells[0].row, destroyer.cells[0].col).result, SHOT_RESULT.HIT);
+  assert.equal(fireAt(game, 0, destroyer.cells[1].row, destroyer.cells[1].col).result, SHOT_RESULT.SUNK);
+  assert.equal(game.currentPlayer, 0);
 });
 
 test('player view hides unsunk enemy ships until the game ends', () => {
@@ -108,17 +120,11 @@ test('player view hides unsunk enemy ships until the game ends', () => {
 test('sinking the whole fleet ends the game, reveals boards and allows a rematch', () => {
   const game = gameInBattle();
   const targets = game.players[1].ships.flatMap((ship) => ship.cells);
-  const p2Misses = [];
-  for (let row = 0; row < 10; row++) {
-    for (let col = 0; col < 10; col++) {
-      if (game.players[0].board[row][col].state === CELL.EMPTY) p2Misses.push({ row, col });
-    }
-  }
 
-  targets.forEach(({ row, col }, i) => {
+  // Every shot hits, so player 1 keeps firing until the fleet is gone.
+  for (const { row, col } of targets) {
     assert.ok(fireAt(game, 0, row, col));
-    if (i < targets.length - 1) fireAt(game, 1, p2Misses[i].row, p2Misses[i].col);
-  });
+  }
 
   assert.equal(game.phase, ONLINE_PHASE.GAME_OVER);
   assert.equal(game.winner, 0);

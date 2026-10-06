@@ -72,8 +72,8 @@ function renderHowToPlay() {
         <ol class="help-list">
           <li>One player creates a room and shares the 6-character code (or invite link). The other player joins with it.</li>
           <li>Each player secretly places 5 ships on a 10×10 board. Ships can't overlap or leave the board.</li>
-          <li>Players take turns firing at one cell on the enemy board.</li>
-          <li><span class="legend legend--hit">●</span> Red means <strong>HIT</strong>, <span class="legend legend--miss">✕</span> means <strong>MISS</strong>.</li>
+          <li>On your turn, fire at one cell on the enemy board.</li>
+          <li><span class="legend legend--hit">●</span> Red means <strong>HIT</strong> and you fire again. <span class="legend legend--miss">✕</span> means <strong>MISS</strong> and the turn passes to your opponent.</li>
           <li>When every cell of a ship is hit, the ship is <strong>SUNK</strong>.</li>
           <li>Sink the whole enemy fleet to win!</li>
         </ol>
@@ -253,7 +253,8 @@ function renderFleetStatus(player, title) {
   `;
 }
 
-function renderShotStatus(shot, message, idleText) {
+// fireAgain: the player keeps the turn after this shot.
+function renderShotStatus(shot, message, idleText, fireAgain) {
   if (message) {
     return `<p class="status">${message}</p>`;
   }
@@ -262,15 +263,17 @@ function renderShotStatus(shot, message, idleText) {
   }
 
   const where = coordinate(shot.row, shot.col);
+  const again = fireAgain ? '<p class="status-detail status-again">Fire again!</p>' : '';
   if (shot.result === SHOT_RESULT.MISS) {
     return `<p class="status status--miss">MISS <span class="status-detail">at ${where}</span></p>`;
   }
   if (shot.result === SHOT_RESULT.HIT) {
-    return `<p class="status status--hit">HIT! <span class="status-detail">at ${where}</span></p>`;
+    return `<p class="status status--hit">HIT! <span class="status-detail">at ${where}</span></p>${again}`;
   }
   return `
     <p class="status status--sunk">SHIP SUNK!</p>
     <p class="status-detail">You sunk the ${shot.shipName}!</p>
+    ${again}
   `;
 }
 
@@ -334,7 +337,7 @@ function renderBattle(online, view) {
       <div class="turn-banner ${myTurn ? 'is-my-turn' : ''}">
         <h2 class="turn-title">${title}</h2>
         ${renderIncomingShot(theirShot)}
-        <div class="turn-status">${renderShotStatus(myShot, view.message, idleText)}</div>
+        <div class="turn-status">${renderShotStatus(myShot, view.message, idleText, myTurn)}</div>
       </div>
 
       <div class="boards">
